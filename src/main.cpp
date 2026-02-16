@@ -107,6 +107,19 @@ void connectToWiFi() {
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED) {
+    if (attempts > 20) { // 10 seconds timeout (20 * 500ms)
+      Serial.println("\nWiFi Connect Failed! Starting in Offline Mode.");
+      // Indicate Error: Flash Red 3 times
+      for(int i=0; i<3; i++) {
+        pixel.setPixelColor(0, pixel.Color(255, 0, 0));
+        pixel.show();
+        delay(200);
+        pixel.setPixelColor(0, 0);
+        pixel.show();
+        delay(200);
+      }
+      return; // Exit function, allowing loop() to run without WiFi
+    }
     delay(500);
     Serial.print(".");
     // Blink Blue/Off
