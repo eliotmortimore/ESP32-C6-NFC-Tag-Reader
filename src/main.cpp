@@ -26,6 +26,8 @@ Adafruit_NeoPixel pixel(1, RGB_BUILTIN, NEO_GRB + NEO_KHZ800);
 void connectToWiFi();
 void sendToSupabase(String uid);
 
+void updateStatusLED();
+
 void setup(void) {
   Serial.begin(115200);
   delay(1000);
@@ -58,8 +60,7 @@ void setup(void) {
   connectToWiFi();
 
   Serial.println("Waiting for an ISO14443A Card ...");
-  pixel.setPixelColor(0, pixel.Color(0, 0, 255)); // Blue (Ready)
-  pixel.show();
+  updateStatusLED(); // Set LED based on connection status
 }
 
 void loop(void) {
@@ -92,9 +93,18 @@ void loop(void) {
 
     // Debounce
     delay(2000); 
-    pixel.setPixelColor(0, pixel.Color(0, 0, 255)); // Back to Blue
-    pixel.show();
+    updateStatusLED(); // Restore LED status (Blue or Red/Off)
   }
+}
+
+void updateStatusLED() {
+  if (WiFi.status() == WL_CONNECTED) {
+    pixel.setPixelColor(0, pixel.Color(0, 0, 255)); // Blue (Online)
+  } else {
+    // Offline Mode: Solid Red to indicate "Not Connected"
+    pixel.setPixelColor(0, pixel.Color(255, 0, 0)); 
+  }
+  pixel.show();
 }
 
 void connectToWiFi() {
