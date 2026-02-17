@@ -6,6 +6,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "secrets.h"
+#include <LittleFS.h>
 
 // --- Pin Definitions ---
 // I2C Interface
@@ -24,8 +25,9 @@ Adafruit_NeoPixel pixel(1, RGB_BUILTIN, NEO_GRB + NEO_KHZ800);
 
 // --- Functions ---
 void connectToWiFi();
-void sendToSupabase(String uid);
-
+bool sendToSupabase(String uid); // Returns true on success
+void saveOffline(String uid);
+void processOfflineQueue();
 void updateStatusLED();
 
 void setup(void) {
@@ -39,6 +41,12 @@ void setup(void) {
   pixel.setPixelColor(0, pixel.Color(255, 165, 0)); // Orange (Booting)
   pixel.show();
 
+  // Initialize LittleFS
+  if(!LittleFS.begin(true)){
+    Serial.println("LittleFS Mount Failed");
+    return;
+  }
+  
   // Initialize I2C
   Wire.begin(PN532_SDA_PIN, PN532_SCL_PIN);
 
@@ -68,6 +76,16 @@ void loop(void) {
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };
   uint8_t uidLength;
 
+  // 1. Process Offline Queue (if connected)
+  // Check every 30 seconds or so, non-blocking check would be better,
+  // but for now we can just check if wifi is up.
+  static unsigned long lastSyncTime = 0;
+  if (millis() - lastSyncTime > 30000 && WiFi.status() == WL_CONNECTED) {
+    processOfflineQueue();
+    lastSyncTime = millis();
+  }
+
+  // 2. Scan for Card
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100);
 
   if (success) {
@@ -88,12 +106,21 @@ void loop(void) {
     Serial.print("  UID Value: ");
     Serial.println(uidString);
 
-    // Send to Database
-    sendToSupabase(uidString);
+    // Try sending to Database
+    bool sent = sendToSupabase(uidString);
+
+    if (!sent) {
+      // If failed, save offline
+      saveOffline(uidString);
+      // Flash Yellow (Saved Offline) instead of Green
+      pixel.setPixelColor(0, pixel.Color(255, 255, 0)); 
+      pixel.show();
+      delay(500);
+    } 
 
     // Debounce
     delay(2000); 
-    updateStatusLED(); // Restore LED status (Blue or Red/Off)
+    updateStatusLED(); // Restore LED status
   }
 }
 
@@ -101,7 +128,7 @@ void updateStatusLED() {
   if (WiFi.status() == WL_CONNECTED) {
     pixel.setPixelColor(0, pixel.Color(0, 0, 255)); // Blue (Online)
   } else {
-    // Offline Mode: Solid Red to indicate "Not Connected"
+    // Offline Mode: Solid Red
     pixel.setPixelColor(0, pixel.Color(255, 0, 0)); 
   }
   pixel.show();
@@ -110,7 +137,6 @@ void updateStatusLED() {
 void connectToWiFi() {
   Serial.print("Connecting to WiFi");
   
-  // Stability improvements
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
@@ -123,7 +149,7 @@ void connectToWiFi() {
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    if (attempts > 120) { // 60 seconds timeout (120 * 500ms)
+    if (attempts > 120) { // 60 seconds
       Serial.println("\nWiFi Connect Failed! Starting in Offline Mode.");
       // Indicate Error: Flash Red 3 times
       for(int i=0; i<3; i++) {
@@ -134,11 +160,10 @@ void connectToWiFi() {
         pixel.show();
         delay(200);
       }
-      return; // Exit function, allowing loop() to run without WiFi
+      return; 
     }
     delay(500);
     Serial.print(".");
-    // Blink Blue/Off
     if (attempts % 2 == 0) pixel.setPixelColor(0, pixel.Color(0, 0, 255));
     else pixel.setPixelColor(0, 0); 
     pixel.show();
@@ -149,58 +174,88 @@ void connectToWiFi() {
   Serial.println(WiFi.localIP());
 }
 
-void sendToSupabase(String uid) {
+bool sendToSupabase(String uid) {
   if(WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    
-    // Construct the endpoint URL: https://[project].supabase.co/rest/v1/scans
     String url = String(SUPABASE_URL) + "/rest/v1/scans";
     
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("apikey", SUPABASE_KEY);
     http.addHeader("Authorization", "Bearer " + String(SUPABASE_KEY));
-    http.addHeader("Prefer", "return=representation"); // Ask for the inserted row back
+    http.addHeader("Prefer", "return=representation");
 
-    // Create JSON Payload
     JsonDocument doc;
     doc["uid"] = uid;
-    // Note: Supabase adds 'created_at' automatically if configured in table
     
     String requestBody;
     serializeJson(doc, requestBody);
     
     int httpResponseCode = http.POST(requestBody);
-    
-    if (httpResponseCode > 0) {
-      String response = http.getString();
-      Serial.print("HTTP Response code: ");
-      Serial.println(httpResponseCode);
-      Serial.println(response);
+    http.end();
 
-      if (httpResponseCode == 201) {
-        // Success: Green Flash
-        pixel.setPixelColor(0, pixel.Color(0, 255, 0)); 
-        pixel.show();
-        delay(500);
-      } else {
-        // API Error: Red Flash
-        pixel.setPixelColor(0, pixel.Color(255, 0, 0)); 
-        pixel.show();
-        delay(500);
-      }
-    } else {
-      Serial.print("Error on sending POST: ");
-      Serial.println(httpResponseCode);
-      // Connection Error: Red Flash
-      pixel.setPixelColor(0, pixel.Color(255, 0, 0)); 
+    if (httpResponseCode == 201) {
+      Serial.println("Supabase Upload Success");
+      // Green Flash
+      pixel.setPixelColor(0, pixel.Color(0, 255, 0)); 
       pixel.show();
       delay(500);
+      return true;
+    } else {
+      Serial.print("Supabase Upload Failed: ");
+      Serial.println(httpResponseCode);
+      return false;
     }
-    http.end();
   } else {
-    Serial.println("WiFi Disconnected");
-    pixel.setPixelColor(0, pixel.Color(255, 0, 0)); 
-    pixel.show();
+    Serial.println("No WiFi connection for upload.");
+    return false;
   }
+}
+
+void saveOffline(String uid) {
+  Serial.println("Saving offline...");
+  File file = LittleFS.open("/queue.txt", "a");
+  if(file){
+    file.println(uid);
+    file.close();
+    Serial.println("Saved to /queue.txt");
+  } else {
+    Serial.println("Failed to open /queue.txt for appending");
+  }
+}
+
+void processOfflineQueue() {
+  if(!LittleFS.exists("/queue.txt")) return;
+
+  Serial.println("Processing Offline Queue...");
+  
+  // 1. Rename queue to sending
+  LittleFS.rename("/queue.txt", "/sending.txt");
+  
+  File file = LittleFS.open("/sending.txt", "r");
+  if(!file){
+    Serial.println("Failed to open queue file");
+    return;
+  }
+
+  // 2. Read line by line
+  while(file.available()){
+    String uid = file.readStringUntil('\n');
+    uid.trim(); // Remove whitespace/newline
+    if(uid.length() > 0) {
+      Serial.print("Syncing offline UID: ");
+      Serial.println(uid);
+      bool sent = sendToSupabase(uid);
+      if(!sent) {
+        // If fail, put back in queue
+        saveOffline(uid);
+      }
+      delay(200); // Small delay between uploads
+    }
+  }
+  file.close();
+  
+  // 3. Delete processed file
+  LittleFS.remove("/sending.txt");
+  Serial.println("Offline Queue Processing Complete");
 }
