@@ -109,6 +109,12 @@ void updateStatusLED() {
 
 void connectToWiFi() {
   Serial.print("Connecting to WiFi");
+  
+  // Stability improvements
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
   if (String(WIFI_PASSWORD) == "") {
     WiFi.begin(WIFI_SSID);
   } else {
@@ -117,7 +123,7 @@ void connectToWiFi() {
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    if (attempts > 20) { // 10 seconds timeout (20 * 500ms)
+    if (attempts > 120) { // 60 seconds timeout (120 * 500ms)
       Serial.println("\nWiFi Connect Failed! Starting in Offline Mode.");
       // Indicate Error: Flash Red 3 times
       for(int i=0; i<3; i++) {
